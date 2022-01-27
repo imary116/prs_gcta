@@ -1,0 +1,581 @@
+---
+title: "best-fit PRS and plot results"
+author: "Mary T. Yohannes"
+date: "10/13/2021"
+output: html_document
+---
+
+# load needed libs 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(data.table)
+library(plotly)
+library(gridExtra)
+library(fmsb)
+```
+
+# PLINK PRS plots
+
+# MULTIPLE SAMPLES all at once 
+
+# Plot I - find the "best-fit" PRS and plot (non-linear regression)
+```{r}
+# dataset names
+sample_names <- c("celso", "cgs1c", "gawli", "xclm2", "xswe1", "xclo3", "xswe6", "xswe5") 
+
+# pval thresholds 
+p.threshold <- c(0.001,0.05,0.1,0.2,0.3,0.4,0.5) 
+
+# for each dataset 
+for (name in sample_names){
+  # read pheno table - already produced with qc files 
+  phenotype <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".pheno"), header=T)
+
+  # read pc table 
+  pcs <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".eigenvec"), header=F)
+
+  # rename pc table columns
+  colnames(pcs) <- c("FID", "IID", paste0("PC",1:6))
+
+  # read sex table 
+  covariate <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".cov"), header=T)
+
+  # merge the 3 tables that were read above
+  pheno <- merge(merge(phenotype, covariate, by=c("FID", "IID")), pcs, by=c("FID","IID")) 
+
+  # run glm for binomial regression 
+  null.model <- glm(as.factor(PHENOTYPE)~., data=pheno[,!colnames(pheno)%in%c("FID","IID")], family='binomial') 
+  
+  # summary of model to compute p-values
+  null.model.summary <- summary(null.model)
+
+  # obtain the Nagelkerke's (pseudo) R^2 for the null model
+  null.r2 <- NagelkerkeR2(null.model)$R2  
+
+  # to hold final result 
+  prs.result <- NULL 
+
+  # set up function to find best-fit PRS 
+  for(i in p.threshold){
+    # merge the merged table (pheno) with the SCORE column of a new table
+    pheno.prs <- merge(pheno, read.table(paste0("~/Desktop/Broad/tj/prs/batch_outputs/mdd_updated/", name, "/", name, ".", i, ".profile"), header=T)[,c("FID","IID", "SCORE")], by=c("FID", "IID"))
+    
+    # run glm binomial with the new merged dataset that has an additional SCORE column
+  	model <- glm(as.factor(PHENOTYPE)~., data=pheno.prs[,!colnames(pheno.prs)%in%c("FID","IID")], family='binomial') 
+  	
+  	# summary of model to compute p-values
+    model.summary <- summary(model)
+  	
+  	# obtain the Nagelkerke's (pseudo) R^2
+  	model.r2 <- NagelkerkeR2(model)$R2  
+  	
+  	# find the difference between the two R^2 values
+  	prs.r2 <- model.r2-null.r2  
+  	
+  	# obtain the coefficients for the SCORE row
+  	prs.coef <- model.summary$coeff["SCORE",]   
+  	
+  	# set up final result table 
+  	prs.result <- rbind(prs.result, data.frame(Threshold=i, R2=prs.r2, P=as.numeric(prs.coef[4]), BETA=as.numeric(prs.coef[1]), SE=as.numeric(prs.coef[2]))) 
+  } 
+  
+  # which is the best-fit PRS?
+  print(prs.result[which.max(prs.result$R2),]) 
+  
+  # generate a pretty format for p-value output
+  prs.result$print.p <- round(prs.result$P, digits = 3)
+  prs.result$print.p[!is.na(prs.result$print.p) & prs.result$print.p == 0] <- format(prs.result$P[!is.na(prs.result$print.p) & prs.result$print.p == 0], digits = 2)
+  prs.result$print.p <- sub("e", "*x*10^", prs.result$print.p)
+
+  # initialize ggplot, requiring the threshold as the x-axis (use factor so that it is uniformly distributed)
+  ggplot(data = prs.result, aes(x = factor(Threshold), y = R2)) +
+    
+    # specify that we want to print p-value on top of the bars
+    geom_text(
+      aes(label = paste(print.p)),
+      vjust = -1.5,
+      hjust = 0,
+      angle = 45,
+      cex = 4,
+      parse = T
+    ) +
+    
+    # specify the range of the plot, *1.25 to provide enough space for the p-values
+    scale_y_continuous(limits = c(0, max(prs.result$R2) * 1.25)) +
+    
+    # specify the axis labels
+    xlab(expression(italic(P) - value ~ threshold ~ (italic(P)[T]))) +
+    ylab(expression(paste("PRS model fit:  ", R ^ 2))) +
+    
+    # draw a bar plot
+    geom_bar(aes(fill = -log10(P)), stat = "identity") +
+    
+    # specify the colors
+    scale_fill_gradient2(
+      low = "dodgerblue",
+      high = "firebrick",
+      mid = "dodgerblue",
+      midpoint = 1e-4,
+      name = bquote(atop(-log[10] ~ model, italic(P) - value),)
+    ) +
+    
+    # add title
+    labs(title=paste0(name, " (mdd - updated)")) +
+    
+    # some beautification of the plot
+    theme_classic() + theme(
+      axis.title = element_text(face = "bold", size = 18),
+      axis.text = element_text(size = 14),
+      legend.title = element_text(face = "bold", size =18),
+      legend.text = element_text(size = 14), axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+
+  # save plots - if you don't want to save the plots to a file and want to print them instead, add a print wrapper around ggplot and comment out this line ("print" prints the plots while in the for loop)
+  ggsave(paste0("~/Desktop/Broad/tj/prs/plots/mdd_updated/", name, "_glm_bar_plot(mdd - updated).png"), height = 7, width = 7)
+}  
+```
+
+
+# Plot II (A) - visualise the relationship between the "best-fit" PRS (which may have been obtained from any of the PRS programs) and the phenotype of interest, coloured according to sex
+```{r}
+# dataset names
+
+# FOR BIP - 0.5 was the P-value threshold that generated the "best-fit" PRS except for cgs1c (0.3) and gawli (0.4) so run those two separately 
+#sample_names <- c("celso", "xclm2", "xswe1", "xclo3", "xswe6", "xswe5") 
+
+# FOR MDD - celso = 0.1, cgs1c = 0.5, gawli = 0.5, xclm2 = 0.2, xswe1 = 0.05, xclo3 = 0.4, xswe6 = 0.3, xswe5 = 0.5
+sample_names <- c("cgs1c", "gawli", "xswe5") 
+
+for (name in sample_names){
+  # read in files
+  prs <- read.table(paste0("~/Desktop/Broad/tj/prs/batch_outputs/mdd_updated/", name, "/", name, ".0.5.profile"), header=T) # 0.5 was the P-value threshold that generated the "best-fit" PRS for 3 samples 
+  pheno <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".pheno"), header=T)
+  sex <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".cov"), header=T)
+  
+  # rename the sex
+  sex$Sex <- as.factor(sex$SEX)
+  levels(sex$Sex) <- c("Male", "Female")
+  
+  # merge the files
+  dat <- merge(merge(prs, pheno), sex)
+  
+  # start plotting
+  print(ggplot(dat, aes(x=SCORE, y=PHENOTYPE, color=Sex))+
+    geom_point()+
+    theme_classic()+
+    labs(title=paste0(name, " (mdd - updated)")) +
+    labs(x="Polygenic Score", y="PHENOTYPE"))
+  ggsave(paste0("~/Desktop/Broad/tj/prs/plots/mdd_updated/", name, "_scatter_plot(mdd - updated).png"), height = 7, width = 7) # remove print wrapper around ggplot before trying to save since "print" prints the plots while in the for loop
+}
+```
+
+# Plot II (B) - generate plots for the ones with different P-value threshold that generated the "best-fit" PRS (not 0.5)
+```{r}
+# FOR BIP - cgs1c = 0.3 and gawli = 0.4 
+
+# FOR MDD - celso = 0.1, xclm2 = 0.2, xswe1 = 0.05, xclo3 = 0.4, xswe6 = 0.3 - just rerun the following codes for each one by changing the profile file that's being read in
+
+# dataset name
+name1 = "xswe6"
+
+# read in files
+prs1 <- read.table(paste0("~/Desktop/Broad/tj/prs/batch_outputs/mdd_updated/", name1, "/", name1, ".0.3.profile"), header=T) # 0.3 was the P-value threshold that generated the "best-fit" PRS
+pheno1 <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name1, "/scz.", name1, ".pheno"), header=T)
+sex1 <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name1, "/scz.", name1, ".cov"), header=T)
+
+# rename the sex
+sex1$Sex <- as.factor(sex1$SEX)
+levels(sex1$Sex) <- c("Male", "Female")
+  
+# merge the files
+dat1 <- merge(merge(prs1, pheno1), sex1)
+
+# start plotting
+ggplot(dat1, aes(x=SCORE, y=PHENOTYPE, color=Sex))+
+  geom_point()+
+  theme_classic()+
+  labs(title=paste0(name1, " (mdd - updated)")) +
+  labs(x="Polygenic Score", y="PHENOTYPE")
+
+ggsave(paste0("~/Desktop/Broad/tj/prs/plots/mdd_updated/", name1, "_scatter_plot(mdd - updated).png"), height = 7, width = 7)
+
+
+# dataset name
+name2 = "xclo3"
+
+# read in files
+prs2 <- read.table(paste0("~/Desktop/Broad/tj/prs/batch_outputs/mdd_updated/", name2, "/", name2, ".0.4.profile"), header=T) # 0.4 was the P-value threshold that generated the "best-fit" PRS
+pheno2 <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name2, "/scz.", name2, ".pheno"), header=T)
+sex2 <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name2, "/scz.", name2, ".cov"), header=T)
+
+# rename the sex
+sex2$Sex <- as.factor(sex2$SEX)
+levels(sex2$Sex) <- c("Male", "Female")
+  
+# merge the files
+dat2 <- merge(merge(prs2, pheno2), sex2)
+
+# start plotting
+ggplot(dat2, aes(x=SCORE, y=PHENOTYPE, color=Sex))+
+  geom_point()+
+  theme_classic()+
+  labs(title=paste0(name2, " (mdd - updated)")) +
+  labs(x="Polygenic Score", y="PHENOTYPE")
+
+ggsave(paste0("~/Desktop/Broad/tj/prs/plots/mdd_updated/", name2, "_scatter_plot(mdd - updated).png"), height = 7, width = 7)
+```
+
+# ####################################################################
+
+# #################################################################
+
+# same to the above run but just for ONE SAMPLE
+
+# Plot I - find the "best-fit" PRS and plot (non-linear regression)
+```{r}
+# pval thresholds 
+p.threshold <- c(0.001,0.05,0.1,0.2,0.3,0.4,0.5) 
+
+
+# read pheno table for one group  
+name = "gawli"
+phenotype <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".pheno"), header=T)
+
+# read pc table 
+pcs <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".eigenvec"), header=F)
+
+# rename pc table columns
+colnames(pcs) <- c("FID", "IID", paste0("PC",1:6))
+
+  # read sex table 
+covariate <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".cov"), header=T)
+
+# merge the 3 tables that were read above
+pheno <- merge(merge(phenotype, covariate, by=c("FID", "IID")), pcs, by=c("FID","IID")) 
+
+# run glm for binomial regression 
+null.model <- glm(as.factor(PHENOTYPE)~., data=pheno[,!colnames(pheno)%in%c("FID","IID")], family='binomial') 
+  
+# summary of model to compute p-values
+null.model.summary <- summary(null.model)
+
+# obtain the Nagelkerke's (pseudo) R^2 for the null model
+null.r2 <- NagelkerkeR2(null.model)$R2  
+
+# to hold final result 
+prs.result <- NULL 
+
+# set up function to find best-fit PRS 
+for(i in p.threshold){
+  # merge the merged table (pheno) with the SCORE column of a new table
+  pheno.prs <- merge(pheno, read.table(paste0("~/Desktop/Broad/tj/prs/batch_outputs/mdd/", name, "/", name, ".", i, ".profile"), header=T)[,c("FID","IID", "SCORE")], by=c("FID", "IID"))
+    
+  # run glm binomial with the new merged dataset that has an additional SCORE column
+  model <- glm(as.factor(PHENOTYPE)~., data=pheno.prs[,!colnames(pheno.prs)%in%c("FID","IID")], family='binomial') 
+  	
+  # summary of model to compute p-values
+  model.summary <- summary(model)
+  	
+  # obtain the Nagelkerke's (pseudo) R^2
+  model.r2 <- NagelkerkeR2(model)$R2  
+  	
+  # find the difference between the two R^2 values
+  prs.r2 <- model.r2-null.r2  
+  	
+  # obtain the coefficients for the SCORE row
+  prs.coef <- model.summary$coeff["SCORE",]   
+  	
+  # set up final result table 
+  prs.result <- rbind(prs.result, data.frame(Threshold=i, R2=prs.r2, P=as.numeric(prs.coef[4]), BETA=as.numeric(prs.coef[1]), SE=as.numeric(prs.coef[2]))) 
+} 
+  
+# which is the best-fit PRS?
+print(prs.result[which.max(prs.result$R2),]) 
+  
+# generate a pretty format for p-value output
+prs.result$print.p <- round(prs.result$P, digits = 3)
+prs.result$print.p[!is.na(prs.result$print.p) & prs.result$print.p == 0] <- format(prs.result$P[!is.na(prs.result$print.p) & prs.result$print.p == 0], digits = 2)
+prs.result$print.p <- sub("e", "*x*10^", prs.result$print.p)
+
+# initialize ggplot, requiring the threshold as the x-axis (use factor so that it is uniformly distributed)
+print(ggplot(data = prs.result, aes(x = factor(Threshold), y = R2)) +
+    
+    # specify that we want to print p-value on top of the bars
+  geom_text(
+    aes(label = paste(print.p)),
+    vjust = -1.5,
+    hjust = 0,
+    angle = 45,
+    cex = 4,
+    parse = T
+  ) +
+    
+  # specify the range of the plot, *1.25 to provide enough space for the p-values
+  scale_y_continuous(limits = c(0, max(prs.result$R2) * 1.25)) +
+  
+  # specify the axis labels
+  xlab(expression(italic(P) - value ~ threshold ~ (italic(P)[T]))) +
+  ylab(expression(paste("PRS model fit:  ", R ^ 2))) +
+  
+  # draw a bar plot
+  geom_bar(aes(fill = -log10(P)), stat = "identity") +
+  
+  # specify the colors
+  scale_fill_gradient2(
+    low = "dodgerblue",
+    high = "firebrick",
+    mid = "dodgerblue",
+    midpoint = 1e-4,
+    name = bquote(atop(-log[10] ~ model, italic(P) - value),)
+  ) +
+  
+  # add title
+  labs(title=paste(name, "-mdd")) +
+  
+  # some beautification of the plot
+  theme_classic() + theme(
+    axis.title = element_text(face = "bold", size = 18),
+    axis.text = element_text(size = 14),
+    legend.title = element_text(face = "bold", size =18),
+    legend.text = element_text(size = 14), axis.text.x = element_text(angle = 45, hjust = 1)
+  ))
+  
+  # save plots - if you want to save to a file, remove the print wrapper around ggplot command and uncomment this line 
+#ggsave(paste0("~/Desktop/Broad/tj/prs/plots/", name, "-mdd_glm_bar_plot.png"), height = 7, width = 7)
+```
+
+
+# Plot II - visualise the relationship between the "best-fit" PRS (which may have been obtained from any of the PRS programs) and the phenotype of interest, coloured according to sex
+```{r}
+# dataset name
+
+name = "gawli"
+
+# read in files
+prs <- read.table(paste0("~/Desktop/Broad/tj/prs/batch_outputs/mdd/", name, "/", name, ".0.5.profile"), header=T) # for all 8 samples, 0.5 was the P-value threshold that generated the "best-fit" PRS
+pheno <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".pheno"), header=T)
+sex <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".cov"), header=T)
+
+# rename the sex
+sex$Sex <- as.factor(sex$SEX)
+levels(sex$Sex) <- c("Male", "Female")
+  
+# merge the files
+dat <- merge(merge(prs, pheno), sex)
+
+# start plotting
+ggplot(dat, aes(x=SCORE, y=PHENOTYPE, color=Sex))+
+  geom_point()+
+  theme_classic()+
+  labs(title=paste(name, "-mdd")) +
+  labs(x="Polygenic Score", y="PHENOTYPE")
+
+# uncomment to save to a file 
+#ggsave(paste0("~/Desktop/Broad/tj/prs/plots/", name, "_mdd_scatter_plot.png"), height = 7, width = 7)
+
+```
+
+# ##########################################################################
+
+# ##########################################################################
+
+# GCTA plots 
+
+# num of cases and controls per dataset - for GCTA plots annotation purposes 
+```{r}
+# set working dir 
+setwd("~/Desktop/Broad/tj/gcta/fam_files")
+# list of fam file names 
+fam_files <- c("scz.celso.QC.fam", "scz.cgs1c.QC.fam", "scz.gawli.QC.fam", "scz.xclm2.QC.fam", "scz.xclo3.QC.fam", "scz.xswe1.QC.fam", "scz.xswe5.QC.fam", "scz.xswe6.QC.fam")
+
+# import fam files as a list and add a column to keep track of which file it came from 
+myFamData_list <- lapply(fam_files, function(x) {
+  out <- data.table::fread(x, header = F)
+  out$source_file <- strsplit(x, "\\.")[[1]][2]
+  return(out)
+})
+
+# merge the list of files into one 
+myFamData <- data.table::rbindlist(myFamData_list)
+
+# count the number of cases and controls per dataset and save that as a dataframe
+library(janitor)
+temp_tbl <- tabyl(myFamData, source_file,  V6)
+colnames(temp_tbl) <- c("dataset","controls","cases") # update col names
+# set the first column as row names
+pheno_count_per_ds <- temp_tbl[,-1] 
+rownames(pheno_count_per_ds) <- temp_tbl[,1]
+
+# prep the count df to be added beside plots
+my_tbl <- tableGrob(pheno_count_per_ds)
+```
+
+# plots 
+```{r}
+# set working directory  
+setwd("~/Desktop/Broad/tj/gcta/outputs")
+
+# list of file names 
+files <- c("celso.txt", "cgs1c.txt", "gawli.txt", "xclm2.txt", "xclo3.txt", "xswe5.txt", "xswe6.txt")
+
+# import files as a list and add a column to keep track of which file it came from 
+myData_list <- lapply(files, function(x) {
+  out <- data.table::fread(x, header = T)
+  out$source_file <- tools::file_path_sans_ext(x)
+  return(out)
+})
+
+# merge the list of files into one 
+myData <- data.table::rbindlist(myData_list)
+
+# only select out the rows we are interested in 
+subData1 <- myData[grepl("V\\(G\\)\\/Vp\\_L", myData$Source),]
+
+# ########## plot I 
+
+# plot
+p1 <- ggplot(subData1, mapping=aes(x=source_file, y=Variance)) + 
+  geom_pointrange(aes(ymin=Variance-SE, ymax=Variance+SE)) +
+  labs(title="V(G)/Vp_L across samples with SE") 
+
+# final plot with count tbl
+grid.arrange(p1, arrangeGrob(my_tbl), ncol = 2)
+
+# save plot 
+#ggsave(paste0("~/Desktop/Broad/tj/gcta/ratio_plot.png"), height = 7, width = 7)
+
+# only select out the rows we are interested in 
+subData2 <- myData[grepl("V\\(G\\)$", myData$Source),]
+
+ # ########## plot II 
+
+# plot
+p2 <- ggplot(subData2, mapping=aes(x=source_file, y=Variance)) + 
+  geom_pointrange(aes(ymin=Variance-SE, ymax=Variance+SE)) +
+  labs(title="V(G) across samples with SE")
+
+# final plot with count tbl
+grid.arrange(p2, arrangeGrob(my_tbl), ncol = 2)
+
+# save plot to a file - uncomment the line below 
+#ggsave(paste0("~/Desktop/Broad/tj/gcta/gene_var_plot.png"), height = 7, width = 7)
+```
+
+# ##########################################################################
+
+# ##########################################################################
+
+# ADDITIONAL CODE 
+
+# Finding the "best-fit" PRS and plot I (for linear regression)
+```{r}
+sample_names <- c("celso", "cgs1c", "gawli", "xclm2", "xswe1", "xclo3", "xswe6", "xswe5")
+p.threshold <- c(0.001,0.05,0.1,0.2,0.3,0.4,0.5) 
+
+for (name in sample_names){
+  phenotype <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".pheno"), header=T)
+  pcs <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".eigenvec"), header=F)
+  colnames(pcs) <- c("FID", "IID", paste0("PC",1:6))
+  covariate <- read.table(paste0("~/Desktop/Broad/tj/prs/generate_qc_files/", name, "/scz.", name, ".cov"), header=T)
+  pheno <- merge(merge(phenotype, covariate, by=c("FID", "IID")), pcs, by=c("FID","IID")) 
+  null.r2 <- summary(lm(PHENOTYPE~., data=pheno[,!colnames(pheno)%in%c("FID","IID")]))$r.squared 
+  prs.result <- NULL 
+  for(i in p.threshold){
+    pheno.prs <- merge(pheno, read.table(paste0("~/Desktop/Broad/tj/prs/batch_outputs/", name, "/", name, ".", i, ".profile"), header=T)[,c("FID","IID", "SCORE")], by=c("FID", "IID")) 
+  	model <- summary(lm(PHENOTYPE~., data=pheno.prs[,!colnames(pheno.prs)%in%c("FID","IID")])) 
+  	model.r2 <- model$r.squared 
+  	prs.r2 <- model.r2-null.r2 
+  	prs.coef <- model$coeff["SCORE",] 
+  	prs.result <- rbind(prs.result, data.frame(Threshold=i, R2=prs.r2, P=as.numeric(prs.coef[4]), BETA=as.numeric(prs.coef[1]), SE=as.numeric(prs.coef[2]))) 
+  } 
+  
+  print(prs.result[which.max(prs.result$R2),]) 
+  
+  # generate a pretty format for p-value output
+  prs.result$print.p <- round(prs.result$P, digits = 3)
+  prs.result$print.p[!is.na(prs.result$print.p) & prs.result$print.p == 0] <- format(prs.result$P[!is.na(prs.result$print.p) & prs.result$print.p == 0], digits = 2)
+  prs.result$print.p <- sub("e", "*x*10^", prs.result$print.p)
+
+# Initialize ggplot, requiring the threshold as the x-axis (use factor so that it is uniformly distributed)
+  ggplot(data = prs.result, aes(x = factor(Threshold), y = R2)) +
+    # Specify that we want to print p-value on top of the bars
+    geom_text(
+      aes(label = paste(print.p)),
+      vjust = -1.5,
+      hjust = 0,
+      angle = 45,
+      cex = 4,
+      parse = T
+    ) +
+    # Specify the range of the plot, *1.25 to provide enough space for the p-values
+    scale_y_continuous(limits = c(0, max(prs.result$R2) * 1.25)) +
+    # Specify the axis labels
+    xlab(expression(italic(P) - value ~ threshold ~ (italic(P)[T]))) +
+    ylab(expression(paste("PRS model fit:  ", R ^ 2))) +
+    # Draw a bar plot
+    geom_bar(aes(fill = -log10(P)), stat = "identity") +
+    # Specify the colors
+    scale_fill_gradient2(
+      low = "dodgerblue",
+      high = "firebrick",
+      mid = "dodgerblue",
+      midpoint = 1e-4,
+      name = bquote(atop(-log[10] ~ model, italic(P) - value),)
+    ) +
+    # add title
+    labs(title=name) +
+    # Some beautification of the plot
+    theme_classic() + theme(
+      axis.title = element_text(face = "bold", size = 18),
+      axis.text = element_text(size = 14),
+      legend.title = element_text(face = "bold", size =18),
+      legend.text = element_text(size = 14), axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+  
+  # save plots
+  #ggsave(paste0("~/Desktop/Broad/tj/prs/plots/", name, "_lm_bar_plot.png"), height = 7, width = 7)
+}
+```
+
+# ##########################################################################
+
+# JUNK CODE
+
+# import PRS files 
+```{r}
+# first file - bg
+mydir_bg <- "batch_outputs/output/bg" # set directory path 
+myfiles_bg <- list.files(path=mydir_bg, pattern="*.profile", full.names=TRUE) # set paths for each file
+content_bg <- myfiles_bg %>% lapply(read.table, header = T) # # read content of each file as large list 
+filename_bg <- myfiles_bg %>% basename() %>% as.list() # file names as list 
+prs_lists_bg <- mapply(c, content_bg, filename_bg, SIMPLIFY = FALSE) # combine file content list and file name list
+prs_bg <- rbindlist(prs_lists_bg, fill = T) # unlist all lists # change column name
+names(prs_bg)[7] <- "which_threshold?"
+
+# second file - bgs
+mydir_bgs <- "batch_outputs/output/bgs" # set directory path 
+myfiles_bgs <- list.files(path=mydir_bgs, pattern="*.profile", full.names=TRUE) # set paths for each file
+content_bgs <- myfiles_bgs %>% lapply(read.table, header = T) # # read content of each file as large list 
+filename_bgs <- myfiles_bgs %>% basename() %>% as.list() # file names as list 
+prs_lists_bgs <- mapply(c, content_bgs, filename_bgs, SIMPLIFY = FALSE) # combine file content list and file name list
+prs_bgs <- rbindlist(prs_lists_bgs, fill = T) # unlist all lists # change column name
+names(prs_bgs)[7] <- "which_threshold?"
+```
+
+# plot
+```{r}
+ggplot(prs_bg, aes(x=`which_threshold?`, y=SCORE, fill=PHENO)) + geom_boxplot()
+ggplot(prs_bgs, aes(x=`which_threshold?`, y=SCORE, fill(PHENO))) + geom_boxplot()
+```
+
+# interactive plot 
+```{r}
+plot_bg <- ggplot(prs_bg, aes(x=`which_threshold?`, y=SCORE, color=PHENO)) + geom_boxplot()
+ggplotly(plot_bg) 
+plot_bgs <- ggplot(prs_bgs, aes(x=`which_threshold?`, y=SCORE, color=PHENO)) + geom_boxplot()
+ggplotly(plot_bgs) 
+```
+
+
+
