@@ -1,18 +1,17 @@
-# author: Mary T. Yohannes 
-
 import hailtop.batch as hb
 import hail as hl
 
 # Step 1: Create the phenotype file - from the .fam file - needed to run greml
 def create_phen(b, fam_file, label):
     j = b.new_job(name=f'{label}-create_phenotype_file')  # define job and label it
+    j.cpu(4) # set cpu
     j.storage('5Gi')  # increase storage
     columns = "'{print $1, $2, $6}'" # which columns to keep - family ID, individual ID, and phenotypes (in the data we have rn cases = 2, controls = 1, missing = "-9" or "NA")
     j.command(f''' awk {columns} {fam_file}  > {j.ofile}''') # subset .fam file to only include the specified columns and no header line
     return j
 
 # Step 2: GCTA-GRM - calculating the genetic relationship matrix (GRM) from all the autosomal SNPs (assuming the maf is 0.01 by default)
-def grm(b, input_files, label, maf_val: float = 0.01, thread_val: int = 10):
+def grm(b, input_files, snps_to_keep, label, maf_val: float = 0.01, thread_val: int = 10):
     j = b.new_job(name=f'{label}-GCTA-GRM')  # define job and label it
     # use a Docker image that contains gcta64
     j.image('hailgenetics/genetics:0.2.67')
@@ -25,9 +24,9 @@ def grm(b, input_files, label, maf_val: float = 0.01, thread_val: int = 10):
         'grm.id': '{root}.grm.id',
         'log': '{root}.log'
     })
-    # run GCTA-GRM analysis
+    # run GCTA-GRM analysis - use subset of autosomal SNPs with MAF < 0.01
     j.command(
-        f'''/gcta/gcta_1.93.1beta/gcta64 --bfile {input_files} --autosome --maf {maf_val} --make-grm --out {j.ofile} --thread-num {thread_val}''')
+        f'''/gcta/gcta_1.93.1beta/gcta64 --bfile {input_files} --extract {snps_to_keep} --autosome --maf {maf_val} --make-grm --out {j.ofile} --thread-num {thread_val}''')
     j.command(f'echo {j.ofile.log}')
     return j
 
@@ -93,6 +92,9 @@ if __name__ == '__main__':
             bim=default_path + i + ".QC.bim",
             fam=default_path + i + ".QC.fam")
 
+        # read in file with snps to keep
+        snps_to_keep = b.read_input(default_path + i + ".QC.prune.in")
+
         ### run the following functions for each file set###
 
         # Step 1: .fam -> phenotype file
@@ -100,7 +102,7 @@ if __name__ == '__main__':
         #b.write_output(run_create.ofile, 'gs://imary116/gcta/one_ds/input_files/bg.phen')
 
         # Step 2: GCTA-GRM
-        run_grm = grm(b, input_files, i, maf_val, thread_val)
+        run_grm = grm(b, input_files, snps_to_keep, i, maf_val, thread_val)
         b.write_output(run_grm.ofile.log, f'gs://imary116/gcta/multi_ds/output/log_files/grm_{i}')  # write out log file
 
         # Step 3: GCTA-GREML
